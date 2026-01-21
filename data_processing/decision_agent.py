@@ -5,8 +5,7 @@ and let an LLM (or any policy) pick which tool to call per request.
 
 Notes:
 - Plug your trained models and actual feature pipeline into the runner stubs.
-- The ReActAgent is LLM-agnostic: inject any `LLMInterface` implementation
-  (OpenAI, local model, etc.).
+- The ReActAgent is LLM-agnostic: inject any `LLMInterface` implementation.
 """
 from __future__ import annotations
 
@@ -284,33 +283,6 @@ class DummyLLM(LLMInterface):
         return "CALL_TOOL lstm_autoencoder"
 
 
-class OpenAILLM(LLMInterface):
-    """Minimal OpenAI chat client implementation.
-
-    Requires the `openai` package and an API key in `OPENAI_API_KEY` or passed in.
-    """
-
-    def __init__(self, model: str = "gpt-3.5-turbo", api_key: Optional[str] = None):
-        try:
-            from openai import OpenAI  # type: ignore
-        except Exception as exc:  # pragma: no cover - import guard
-            raise ImportError("The 'openai' package is required for OpenAILLM") from exc
-        key = api_key or os.getenv("OPENAI_API_KEY")
-        if not key:
-            raise ValueError("OPENAI_API_KEY is not set")
-        self.client = OpenAI(api_key=key)
-        self.model = model
-
-    def complete(self, prompt: str) -> str:
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=32,
-            temperature=0,
-        )
-        return resp.choices[0].message.content or ""
-
-
 class BailianLLM(LLMInterface):
     """Alibaba Bailian (DashScope) client using the dashscope SDK.
 
@@ -496,20 +468,60 @@ def summarize_status(result: ModelResult) -> str:
     return "预警" if score > 0.5 else "正常"
 
 
-def explain_choice(history: List[AgentStep]) -> str:
-    """Provide a brief rationale based on the chosen tools and heuristic."""
+def explain_choice(
+    history: List[AgentStep],
+    llm: Optional[LLMInterface] = None,
+    context: Optional[DecisionContext] = None,
+    result: Optional[ModelResult] = None,
+) -> str:
+    """Ask the LLM for a choice rationale; fall back to heuristic when unavailable."""
 
-    if not history:
-        return "未产生决策轨迹。"
+    fallback = "未产生决策轨迹。" if not history else None
     tools = [step.action.tool_name for step in history if step.action]
+    if fallback:
+        return fallback
     if not tools:
         return "未选择任何模型。"
     last = tools[-1]
-    if last == "arima":
-        return "根据提示：数据量级较大或需要快速残差检测时选择 ARIMA。"
-    if last == "lstm_autoencoder":
-        return "根据提示：数据量级一般且需非线性重构检测时选择 LSTM 自编码器，最终决策优先倾向 LSTM。"
-    return f"选择了 {last}，请结合上下文查看。"
+
+    def _heuristic_reason() -> str:
+        if last == "arima":
+            return "根据提示：数据量级较大或需要快速残差检测时选择 ARIMA。"
+        if last == "lstm_autoencoder":
+            return "根据提示：数据量级一般且需非线性重构检测时选择 LSTM 自编码器，最终决策优先倾向 LSTM。"
+        return f"选择了 {last}，请结合上下文查看。"
+
+    if llm is None or isinstance(llm, DummyLLM):
+        return _heuristic_reason()
+
+    # Build a concise LLM prompt with only aggregated info (no raw signals).
+    trace_lines = []
+    for step in history:
+        if step.action:
+            trace_lines.append(
+                f"tool={step.action.tool_name}, score={step.action.observation.score:.4f}, raw={step.action.observation.raw}"
+            )
+    trace_text = " | ".join(trace_lines)
+    ctx_text = f"传感器: {context.sensor_id}, 采样频率: {context.frequency_hz}Hz" if context else ""
+    res_text = (
+        f"最终模型: {result.label}, 分数: {result.score:.4f}, 细节: {result.raw}"
+        if result
+        else ""
+    )
+    prompt = (
+        "你是一个决策解释助手，请根据故障检测代理的决策轨迹，生成一句话说明为什么选择了该模型。\n"
+        f"{ctx_text}\n"
+        f"{res_text}\n"
+        f"决策轨迹: {trace_text}\n"
+        "输出中文简短理由。"
+    )
+    try:
+        out = llm.complete(prompt)
+        if isinstance(out, str) and out.strip():
+            return out.strip()
+    except Exception as exc:  # pragma: no cover - runtime guard
+        logger.warning("LLM explain_choice failed: %s", exc)
+    return _heuristic_reason()
 
 
 def make_recommendation(
@@ -518,6 +530,8 @@ def make_recommendation(
     history: List[AgentStep],
     status: str,
     context: DecisionContext,
+    allow_data_upload: bool = False,
+    data_excerpt: Optional[List[float]] = None,
 ) -> str:
     """Ask the LLM to propose a brief action recommendation based on the run."""
 
@@ -529,12 +543,18 @@ def make_recommendation(
         if step.action:
             trace_lines.append(f"{step.action.tool_name}: score={step.action.observation.score:.4f}")
     trace_text = " | ".join(trace_lines)
+    data_note = "(未包含数据)"
+    data_section = ""
+    if allow_data_upload and data_excerpt:
+        # Only upload a small downsampled excerpt to reduce leakage and prompt length.
+        data_note = "(包含下采样片段)"
+        data_section = f"\n下采样片段: {json.dumps(data_excerpt)}"
     prompt = (
         "你是一名设备故障预警助手。请根据模型输出给出一句话决策建议。\n"
         f"传感器: {context.sensor_id}, 采样频率: {context.frequency_hz}Hz\n"
         f"状态: {status}\n"
         f"最终模型: {result.label}, 分数: {result.score:.4f}, 细节: {result.raw}\n"
-        f"决策轨迹: {trace_text}\n"
+        f"决策轨迹: {trace_text} {data_note}{data_section}\n"
         "输出一句中文建议，简短可执行。"
     )
     try:
@@ -554,6 +574,35 @@ def build_default_registry() -> ModelRegistry:
     registry.register("lstm_autoencoder", LSTMAutoencoderRunner)
     registry.register("arima", ARIMARunner)
     return registry
+
+
+def ask_consent_for_data_upload() -> bool:
+    """Explicitly ask before sending any raw/derived data to an external LLM."""
+
+    env = os.getenv("ALLOW_LLM_DATA_UPLOAD")
+    if env:
+        return env.strip().lower() in {"1", "true", "yes", "y"}
+
+    try:
+        choice = input(
+            "警告：即将把下采样后的振动数据片段发送到外部 LLM (可能出网)。是否继续？(y/N): "
+        )
+    except Exception:
+        return False
+    return choice.strip().lower() in {"y", "yes"}
+
+
+def collect_data_excerpt(features: Any, max_points: int = 512) -> List[float]:
+    """Downsample 1D signal to a small excerpt suitable for LLM prompt."""
+
+    arr = np.asarray(features, dtype=np.float32).reshape(-1)
+    if len(arr) == 0:
+        return []
+    if len(arr) <= max_points:
+        return arr.tolist()
+    # Evenly spaced sampling to preserve coarse shape.
+    idx = np.linspace(0, len(arr) - 1, num=max_points, dtype=int)
+    return arr[idx].tolist()
 
 
 def assemble_agent(model_configs: Iterable[ModelConfig], llm: Optional[LLMInterface] = None, max_steps: int = 3) -> ReActAgent:
@@ -582,25 +631,30 @@ def _example_main() -> None:
         ModelConfig(name="lstm_autoencoder", model_path=Path("artifacts_cwru_lstm_ae")),
         ModelConfig(name="arima", params={"order": (3, 0, 3), "threshold_sigma": 3.0}),
     ]
-    # Prefer Bailian (DashScope, default model qwen-turbo) if available, else OpenAI, else Dummy.
+    # Prefer Bailian (DashScope, default model qwen-turbo) if available, else Dummy.
     llm = None
     if os.getenv("DASHSCOPE_API_KEY") or os.getenv("DASHCOPE_API_KEY"):
         try:
             llm = BailianLLM()
         except Exception as exc:
-            logger.warning("Falling back from Bailian to next LLM: %s", exc)
-    if llm is None and os.getenv("OPENAI_API_KEY"):
-        try:
-            llm = OpenAILLM()
-        except Exception as exc:
-            logger.warning("Falling back from OpenAI to DummyLLM: %s", exc)
+            logger.warning("Falling back from Bailian to DummyLLM: %s", exc)
     chosen_llm = llm or DummyLLM()
     print("Using LLM:", type(chosen_llm).__name__)
     agent = assemble_agent(configs, llm=chosen_llm, max_steps=2)
     result, trace = agent.run(fake_features, ctx, verbose=True)
     status = summarize_status(result)
-    recommendation = make_recommendation(chosen_llm, result, trace, status, ctx)
-    choice_reason = explain_choice(trace)
+    consent = ask_consent_for_data_upload()
+    excerpt = collect_data_excerpt(fake_features) if consent else None
+    recommendation = make_recommendation(
+        chosen_llm,
+        result,
+        trace,
+        status,
+        ctx,
+        allow_data_upload=consent,
+        data_excerpt=excerpt,
+    )
+    choice_reason = explain_choice(trace, llm=chosen_llm, context=ctx, result=result)
     print("Final decision:", result)
     print("Status:", status)
     print("Choice reason:", choice_reason)
