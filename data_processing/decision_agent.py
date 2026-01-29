@@ -108,11 +108,13 @@ class LSTMAutoencoderRunner(ModelRunner):
         self.model_path = artifact_dir / "lstm_ae_model.h5"
         self.scaler_path = artifact_dir / "lstm_ae_scaler.pkl"
         self.meta_path = artifact_dir / "lstm_ae_meta.json"
+
         if not (self.model_path.exists() and self.scaler_path.exists() and self.meta_path.exists()):
             raise FileNotFoundError(
                 f"Missing CWRU LSTM AE artifacts in {artifact_dir}. Expected model/scaler/meta files."
             )
-        # Load without compiling to avoid metric deserialization issues; recompile lightly for predict.
+
+        # 正确加载模型
         self.model = tf.keras.models.load_model(self.model_path, compile=False)
         self.model.compile(optimizer="adam", loss="mae")
         self.scaler = joblib.load(self.scaler_path)
@@ -289,7 +291,7 @@ class BailianLLM(LLMInterface):
     Requires `dashscope` package and an API key in `DASHSCOPE_API_KEY` (preferred) or `DASHCOPE_API_KEY`.
     """
 
-    def __init__(self, model: str = "qwen-turbo", api_key: Optional[str] = None):
+    def __init__(self, model: str = "qwen3-max", api_key: Optional[str] = None):
         try:
             import dashscope  # type: ignore
             from dashscope import Generation  # type: ignore
@@ -610,60 +612,14 @@ def assemble_agent(model_configs: Iterable[ModelConfig], llm: Optional[LLMInterf
     tools: Dict[str, ModelRunner] = {}
     for cfg in model_configs:
         tools[cfg.name] = registry.create(cfg)
-    agent_llm = llm or DummyLLM()
+    # 强制只用BailianLLM，若失败则直接抛异常
+    if llm is not None:
+        agent_llm = llm
+    else:
+        try:
+            agent_llm = BailianLLM(model="qwen3-max")
+        except Exception as exc:
+            print("[ERROR] BailianLLM初始化失败：", exc)
+            raise
     return ReActAgent(agent_llm, tools, max_steps=max_steps)
 
-
-# ----------------------
-# Example CLI entry point
-# ----------------------
-
-def _example_main() -> None:
-    logging.basicConfig(level=logging.INFO)
-    # Placeholder raw vibration samples; replace with real CWRU signal array
-    fake_features = np.random.randn(5000).astype(np.float32)
-    ctx = DecisionContext(
-        sensor_id="sensor-001",
-        frequency_hz=128.0,
-        feature_schema=["rms", "kurtosis", "crest_factor"],
-    )
-    configs = [
-        ModelConfig(name="lstm_autoencoder", model_path=Path("artifacts_cwru_lstm_ae")),
-        ModelConfig(name="arima", params={"order": (3, 0, 3), "threshold_sigma": 3.0}),
-    ]
-    # Prefer Bailian (DashScope, default model qwen-turbo) if available, else Dummy.
-    llm = None
-    if os.getenv("DASHSCOPE_API_KEY") or os.getenv("DASHCOPE_API_KEY"):
-        try:
-            llm = BailianLLM()
-        except Exception as exc:
-            logger.warning("Falling back from Bailian to DummyLLM: %s", exc)
-    chosen_llm = llm or DummyLLM()
-    print("Using LLM:", type(chosen_llm).__name__)
-    agent = assemble_agent(configs, llm=chosen_llm, max_steps=2)
-    result, trace = agent.run(fake_features, ctx, verbose=True)
-    status = summarize_status(result)
-    consent = ask_consent_for_data_upload()
-    excerpt = collect_data_excerpt(fake_features) if consent else None
-    recommendation = make_recommendation(
-        chosen_llm,
-        result,
-        trace,
-        status,
-        ctx,
-        allow_data_upload=consent,
-        data_excerpt=excerpt,
-    )
-    choice_reason = explain_choice(trace, llm=chosen_llm, context=ctx, result=result)
-    print("Final decision:", result)
-    print("Status:", status)
-    print("Choice reason:", choice_reason)
-    print("Recommendation:", recommendation)
-    print("Trace:")
-    for step in trace:
-        if step.action:
-            print(step.thought, step.action.tool_name, step.action.observation)
-
-
-if __name__ == "__main__":
-    _example_main()
