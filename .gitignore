@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Data files (too large for GitHub)
+*.rar
+*.zip
+*.7z
+*.tar.gz
+*.downloading
+*.baiduyun*
+Data/
+XJTU-SY*/
+
+# PDFs / references
+*.pdf
+Important References/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model artifacts (optional — uncomment if you don't want to track them)
+# artifacts_*/

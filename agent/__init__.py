@@ -1,0 +1,26 @@
+"""Agent package — LLM-driven decision orchestration."""
+from agent.llm import LLMInterface, DummyLLM, BailianLLM
+from agent.react_agent import ReActAgent, AgentStep, ToolCall
+from agent.tools import (
+    assemble_agent,
+    summarize_status,
+    explain_choice,
+    make_recommendation,
+    collect_data_excerpt,
+    ask_consent_for_data_upload,
+)
+
+__all__ = [
+    "LLMInterface",
+    "DummyLLM",
+    "BailianLLM",
+    "ReActAgent",
+    "AgentStep",
+    "ToolCall",
+    "assemble_agent",
+    "summarize_status",
+    "explain_choice",
+    "make_recommendation",
+    "collect_data_excerpt",
+    "ask_consent_for_data_upload",
+]

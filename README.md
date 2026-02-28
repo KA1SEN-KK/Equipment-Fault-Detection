@@ -9,19 +9,47 @@
 ```
 Equipment-Fault-Detection/
 ├── README.md
-├── main.py
-├── frontend.py
-├── gen_npy_from_mat.py
-├── test_signal.npy
-├── artifacts_cwru_lstm_ae/
+├── main.py                          # 主入口（前端/命令行）
+├── gen_npy_from_mat.py              # mat 转 npy 脚本
+├── test_signal.npy                  # 示例振动信号
+│
+├── frontend/                        # 前端界面
+│   └── app.py                       # Streamlit 前端
+│
+├── models/                          # 核心算法模型
+│   ├── base.py                      # ModelRunner / ModelResult / ModelConfig 接口
+│   ├── lstm_autoencoder.py          # LSTM 自编码器推理
+│   ├── arima_runner.py              # ARIMA 残差检测
+│   ├── placeholder_runners.py       # RF / ANN / PCA 等占位 runner
+│   └── registry.py                  # 模型注册表与工厂
+│
+├── agent/                           # AI Agent 决策引擎
+│   ├── llm.py                       # LLM 接口（DummyLLM / BailianLLM）
+│   ├── react_agent.py               # ReAct 风格编排器
+│   ├── prompts.py                   # Prompt 模板
+│   └── tools.py                     # 状态汇总、解释、建议、Agent 装配
+│
+├── feature_engineering/             # 特征工程
+│   ├── time_domain.py               # 时域特征（RMS / 峰度 / 波峰因子…）
+│   ├── frequency_domain.py          # 频域特征（FFT / 谱质心 / 谱熵…）
+│   └── pipeline.py                  # 统一特征提取管线
+│
+├── utils/                           # 公共工具
+│   ├── data_loader.py               # CWRU 数据加载、滑动窗口
+│   └── evaluation.py                # 分类 / 异常检测评估指标
+│
+├── training/                        # 模型训练管线
+│   └── cwru_lstm_autoencoder.py     # LSTM-AE 训练脚本
+│
+├── data_processing/                 # [旧] 向后兼容层
+│   └── decision_agent.py            # 重导出所有符号，兼容旧 import
+│
+├── artifacts_cwru_lstm_ae/          # 模型产物
 │   ├── lstm_ae_model.h5
 │   ├── lstm_ae_scaler.pkl
 │   └── lstm_ae_meta.json
-├── data_processing/
-│   ├── decision_agent.py
-│   ├── cwru_lstm_autoencoder.py
-│   └── mqtt_fault_sender.py
-└── 凯斯西储大学数据/
+│
+└── 凯斯西储大学数据/                # CWRU 原始振动数据集
     ├── 12k Drive End Bearing Fault Data/
     ├── 12k Fan End Bearing Fault Data/
     ├── 48k Drive End Bearing Fault Data/
@@ -34,22 +62,33 @@ Equipment-Fault-Detection/
 |-------------------------------------|--------------------------------------------------------------|
 | README.md                           | 项目说明文档                                                 |
 | main.py                             | 主程序入口，支持前端和命令行两种模式                         |
-| frontend.py                         | Streamlit 前端界面，交互式上传数据并展示检测结果              |
+| **frontend/**                       | **前端界面包**                                               |
+| └── app.py                          | Streamlit 前端界面，交互式上传数据并展示检测结果              |
+| **models/**                         | **核心算法模型包**                                           |
+| ├── base.py                         | ModelRunner / ModelResult / ModelConfig 基础接口              |
+| ├── lstm_autoencoder.py             | LSTM 自编码器推理 runner                                     |
+| ├── arima_runner.py                 | ARIMA 残差检测 runner                                        |
+| ├── placeholder_runners.py          | RF / ANN / KMeans / IF / SVM 等占位 runner                   |
+| └── registry.py                     | 模型注册表与工厂函数                                         |
+| **agent/**                          | **AI Agent 决策引擎包**                                      |
+| ├── llm.py                          | LLM 接口（DummyLLM / BailianLLM）                           |
+| ├── react_agent.py                  | ReAct 风格 Agent 编排器                                      |
+| ├── prompts.py                      | Prompt 模板（路由、解释、建议）                              |
+| └── tools.py                        | 状态汇总、解释、建议生成、Agent 装配                         |
+| **feature_engineering/**            | **特征工程包**                                               |
+| ├── time_domain.py                  | 时域特征（RMS / 峰度 / 波峰因子 / 脉冲因子等）              |
+| ├── frequency_domain.py             | 频域特征（谱质心 / 谱峰 / 谱熵等）                          |
+| └── pipeline.py                     | 统一特征提取管线                                             |
+| **utils/**                          | **公共工具包**                                               |
+| ├── data_loader.py                  | CWRU 数据加载、滑动窗口、信号采集                            |
+| └── evaluation.py                   | 异常检测 / 分类评估指标                                      |
+| **training/**                       | **模型训练管线**                                             |
+| └── cwru_lstm_autoencoder.py        | LSTM 自编码器训练脚本（仅训练时用）                          |
+| data_processing/                    | [旧] 向后兼容层，重导出所有符号                              |
 | gen_npy_from_mat.py                 | mat文件转npy测试数据脚本                                     |
 | test_signal.npy                     | 示例振动信号npy文件（可用于前端上传测试）                    |
 | artifacts_cwru_lstm_ae/             | 存放训练好的LSTM自编码器模型及其scaler、meta信息             |
-| ├── lstm_ae_model.h5                | LSTM自编码器模型权重文件                                     |
-| ├── lstm_ae_scaler.pkl              | 归一化/标准化scaler文件                                      |
-| └── lstm_ae_meta.json               | 模型窗口、步长、阈值等元信息                                 |
-| data_processing/                    | 数据处理与推理相关代码                                       |
-| ├── decision_agent.py               | 决策与推理核心，集成多种模型和 LLM 选择逻辑                  |
-| ├── cwru_lstm_autoencoder.py        | LSTM自编码器模型训练脚本（仅训练时用）                        |
-| └── mqtt_fault_sender.py            | 故障结果MQTT发送脚本（如有用到）                             |
 | 凯斯西储大学数据/                    | CWRU原始振动数据集，含多种工况和部件                         |
-| ├── 12k Drive End Bearing Fault Data/| 12k转速驱动端轴承故障数据                                   |
-| ├── 12k Fan End Bearing Fault Data/  | 12k转速风扇端轴承故障数据                                   |
-| ├── 48k Drive End Bearing Fault Data/| 48k转速驱动端轴承故障数据                                   |
-| └── Normal Baseline Data/            | 正常工况数据                                                |
 
 ## 示例输出页面
 ![示例输出页面](./test_output.png)
