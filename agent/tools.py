@@ -168,3 +168,30 @@ def assemble_agent(
             print("[ERROR] BailianLLM初始化失败：", exc)
             raise
     return ReActAgent(agent_llm, tools, max_steps=max_steps)
+
+
+def assemble_fusion_agent(
+    model_configs: Iterable[ModelConfig],
+    llm: Optional[LLMInterface] = None,
+) -> "FusionAgent":
+    """Build a FusionAgent that runs all models and fuses via LLM.
+
+    This is the recommended agent for production use — every model runs
+    independently, and the LLM performs expert-level synthesis.
+    """
+    from agent.fusion_agent import FusionAgent
+
+    registry = build_default_registry()
+    tools: Dict[str, ModelRunner] = {}
+    for cfg in model_configs:
+        tools[cfg.name] = registry.create(cfg)
+
+    if llm is not None:
+        agent_llm = llm
+    else:
+        try:
+            agent_llm = BailianLLM(model="qwen3-max")
+        except Exception as exc:
+            print("[ERROR] BailianLLM初始化失败：", exc)
+            raise
+    return FusionAgent(agent_llm, tools)
