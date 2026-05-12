@@ -35,6 +35,8 @@ def build_default_registry() -> ModelRegistry:
     from models.kmeans_runner import KMeansRunner
     from models.random_forest_runner import RandomForestRunner
     from models.cnn1d_runner import CNN1DRunner
+    from models.cmapss_lstm_ae_runner import CMAPSSLSTMAERunner
+    from models.cmapss_rul_runner import CMAPSSRULRunner
     from models.placeholder_runners import (
         ANNRunner,
         AutoencoderRunner,
@@ -42,7 +44,7 @@ def build_default_registry() -> ModelRegistry:
     )
 
     registry = ModelRegistry()
-    # ── Real implementations ──
+    # ── CWRU models (vibration signal, 1-D) ──
     registry.register("lstm_autoencoder", LSTMAutoencoderRunner)
     registry.register("arima", ARIMARunner)
     registry.register("isolation_forest", IsolationForestRunner)
@@ -51,6 +53,9 @@ def build_default_registry() -> ModelRegistry:
     registry.register("kmeans", KMeansRunner)
     registry.register("random_forest", RandomForestRunner)
     registry.register("cnn1d", CNN1DRunner)
+    # ── CMAPSS models (multivariate cycle data) ──
+    registry.register("cmapss_lstm_ae", CMAPSSLSTMAERunner)
+    registry.register("cmapss_rul", CMAPSSRULRunner)
     # ── Placeholders (to be replaced) ──
     registry.register("ann", ANNRunner)
     registry.register("autoencoder", AutoencoderRunner)
