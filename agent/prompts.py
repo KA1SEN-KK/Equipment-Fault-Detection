@@ -101,28 +101,41 @@ def build_recommendation_prompt(
     allow_data_upload: bool = False,
     data_excerpt: Optional[list] = None,
 ) -> str:
-    """Build prompt for generating action recommendations."""
-    trace_lines = []
-    for step in history:
-        if step.action:
-            trace_lines.append(
-                f"{step.action.tool_name}: score={step.action.observation.score:.4f}"
-            )
-    trace_text = " | ".join(trace_lines)
+    """Build CMAPSS-specific maintenance recommendation prompt."""
+    raw = result.raw
+    detection = raw.get("detection", {})
+    rul_info   = raw.get("rul", {})
 
-    data_note = "(未包含数据)"
-    data_section = ""
-    if allow_data_upload and data_excerpt:
-        data_note = "(包含下采样片段)"
-        data_section = f"\n下采样片段: {json.dumps(data_excerpt)}"
+    rul_cycles   = rul_info.get("rul_cycles",    result.score)
+    rul_cap      = rul_info.get("rul_cap",        125)
+    ens_score    = detection.get("ensemble_score", 0)
+    ae_score     = detection.get("ae_score",       0)
+    rf_score     = detection.get("rf_score",       0)
+    engine_id    = raw.get("engine_id",            context.sensor_id)
+    n_cycles     = raw.get("n_cycles_observed",    "未知")
+
+    health_pct = min(rul_cycles / rul_cap, 1.0) * 100
 
     return (
-        "你是一名设备故障预警助手。请根据模型输出给出一句话决策建议。\n"
-        f"传感器: {context.sensor_id}, 采样频率: {context.frequency_hz}Hz\n"
-        f"状态: {status}\n"
-        f"最终模型: {result.label}, 分数: {result.score:.4f}, 细节: {result.raw}\n"
-        f"决策轨迹: {trace_text} {data_note}{data_section}\n"
-        "输出一句中文建议，简短可执行。"
+        "你是一名工业设备健康管理工程师。以下是涡扇发动机的实时诊断结果，请给出专业的维护建议。\n\n"
+        "## 发动机信息\n"
+        f"- 发动机编号：{engine_id}\n"
+        f"- 已运行周期：{n_cycles}\n\n"
+        "## 故障检测结果（4模型AUC加权集成）\n"
+        f"- 集成故障得分：{ens_score:.3f}（>0.25报警，>0.45严重）\n"
+        f"- 检测状态：{detection.get('label', status)}\n"
+        f"- LSTM自编码器得分：{ae_score:.3f}\n"
+        f"- 随机森林故障概率：{rf_score:.3f}\n\n"
+        "## 剩余寿命预测\n"
+        f"- 预测RUL：{rul_cycles:.1f} 周期\n"
+        f"- 健康度：{health_pct:.1f}%（基于RUL上限{rul_cap}周期）\n"
+        f"- RUL状态：{rul_info.get('severity', status)}\n\n"
+        "## 你的任务\n"
+        "综合故障检测得分与剩余寿命，给出2-3句中文维护建议，需包含：\n"
+        "1. 当前风险等级判断\n"
+        "2. 建议采取的具体行动（继续运行/加强监测/计划检修/立即停机）\n"
+        "3. 建议的检修时间窗口（如适用）\n"
+        "语言简洁专业，面向运维人员。"
     )
 
 

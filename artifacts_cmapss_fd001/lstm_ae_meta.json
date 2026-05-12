@@ -1,0 +1,10 @@
+{
+  "subset": "FD001",
+  "win": 30,
+  "step": 1,
+  "latent": 16,
+  "threshold": 0.5471036744117737,
+  "threshold_q": 0.99,
+  "healthy_rul_min": 50,
+  "n_features": 14
+}

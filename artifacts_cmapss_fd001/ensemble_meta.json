@@ -1,0 +1,38 @@
+{
+  "models": [
+    "lstm_ae",
+    "isolation_forest",
+    "ocsvm",
+    "random_forest"
+  ],
+  "aucs": {
+    "lstm_ae": 0.9562379821287184,
+    "isolation_forest": 0.9668996719828074,
+    "ocsvm": 0.9632552878633638,
+    "random_forest": 0.989518436828413
+  },
+  "weights": {
+    "lstm_ae": 0.2467130665985349,
+    "isolation_forest": 0.24946382346887924,
+    "ocsvm": 0.24852355838970996,
+    "random_forest": 0.2552995515428759
+  },
+  "score_bounds": {
+    "lstm_ae": [
+      0.45783308148384094,
+      1.388493545055389
+    ],
+    "isolation_forest": [
+      -0.09166109054756061,
+      0.17972306251850523
+    ],
+    "ocsvm": [
+      -5.488074853753263,
+      27.36679369198818
+    ]
+  },
+  "win": 30,
+  "n_features": 14,
+  "fault_threshold": 0.25,
+  "critical_threshold": 0.45
+}
