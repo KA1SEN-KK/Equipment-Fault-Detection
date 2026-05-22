@@ -2,6 +2,8 @@
 import os
 import json
 import time
+import queue
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -60,7 +62,7 @@ def load_llm(key: str):
 if mode == "CMAPSS 发动机健康管理":
     from models.cmapss_lstm_ae_runner import CMAPSSLSTMAERunner
     from models.cmapss_rul_runner import CMAPSSRULRunner
-    from utils.cmapss_loader import load_cmapss, USEFUL_SENSORS
+    from utils.cmapss_loader import load_cmapss, USEFUL_SENSORS, N_FEATURES
 
     st.caption("基于 NASA CMAPSS FD001 · 4模型AUC加权集成故障检测 · LSTM回归RUL预测 · 大模型维护建议")
 
@@ -124,7 +126,7 @@ if mode == "CMAPSS 发动机健康管理":
     ctx = DecisionContext(sensor_id=f"engine-{selected_unit}",
                           frequency_hz=0.0, feature_schema=USEFUL_SENSORS)
 
-    tab_static, tab_stream = st.tabs(["📊 静态诊断", "🔴 实时流式推理"])
+    tab_static, tab_mqtt = st.tabs(["📊 静态诊断", "📡 MQTT 实时接收"])
 
     # ── Tab 1: 静态诊断 ──
     with tab_static:
@@ -198,48 +200,209 @@ if mode == "CMAPSS 发动机健康管理":
             st.success(rec)
             st.caption("由大模型基于检测结果与 RUL 预测综合生成")
 
-    # ── Tab 2: 流式推理 ──
-    with tab_stream:
-        from stream.engine import StreamingEngine
-        st.header("🔴 实时流式推理模拟")
-        st.caption("逐周期喂入传感器数据，模拟真实场景下的在线检测与 RUL 预测。")
+    # ═══════════════════════════════════════════════════════════
+    # TAB 3 — MQTT 实时接收
+    # ═══════════════════════════════════════════════════════════
+    with tab_mqtt:
+        from stream.engine import StreamingEngine as _SE
 
-        cfg1, cfg2 = st.columns(2)
-        speed      = cfg1.slider("模拟速度（周期/秒）", 1, 20, 5)
-        start_from = cfg2.slider("从第几个周期开始", 1, max(1, n_cycles - 1), 1)
+        st.header("📡 MQTT 实时接收")
+        st.caption("接收来自另一台主机的传感器数据，累积30条后自动推理输出结果。")
 
-        if st.button("▶ 开始流式推理", type="primary", key="stream_start"):
-            engine = StreamingEngine(det_runner, rul_runner, win=det_runner.win)
-            ph_status = st.empty(); ph_metrics = st.empty()
-            ph_prog   = st.empty(); ph_chart   = st.empty(); ph_alert = st.empty()
-            rul_hist: list[float] = []; cyc_hist: list[int] = []
+        st.info(
+            "**发送端（另一台主机）运行：**\n"
+            "```\npip install paho-mqtt pandas numpy\n"
+            "python send_demo.py --broker <本机IP> --unit 1 --interval 1.0\n```"
+        )
 
-            for i, row in enumerate(sensor_arr[start_from - 1:]):
-                result = engine.feed(row)
-                cn = start_from + i
-                if result.alert_change:
-                    (ph_alert.error if result.alert else ph_alert.success)(
-                        f"{'🚨' if result.alert else '✅'} 第 {cn} 周期：{result.detection.label if result.ready else ''}")
-                if result.ready:
-                    rul_hist.append(result.rul.score); cyc_hist.append(cn)
-                    ph_status.markdown(
-                        f"**周期 {cn}/{n_cycles}** | 故障：{STATUS_EMOJI.get(result.detection.label, '')} "
-                        f"| RUL：**{result.rul.score:.0f}** ({STATUS_EMOJI.get(result.rul.label, '')})")
+        mc1, mc2 = st.columns(2)
+        mqtt_broker = mc1.text_input("Broker IP", "127.0.0.1", key="mqtt_broker")
+        mqtt_port   = mc2.number_input("Port", value=1883, key="mqtt_port")
+        mqtt_topic  = st.text_input("Topic", "efd/v1/sensors/cycle", key="mqtt_topic")
+        win_size    = det_runner.win
+
+        if st.button("📡 连接并开始接收", type="primary", key="mqtt_connect"):
+
+            data_q: queue.Queue = queue.Queue()
+
+            def _mqtt_thread():
+                import importlib
+                mqtt_mod = importlib.import_module("paho.mqtt.client")
+                try:
+                    client = mqtt_mod.Client(
+                        mqtt_mod.CallbackAPIVersion.VERSION2,
+                        client_id="efd-frontend",
+                        protocol=mqtt_mod.MQTTv311,
+                    )
+                except AttributeError:
+                    client = mqtt_mod.Client(client_id="efd-frontend", protocol=mqtt_mod.MQTTv311)
+
+                def on_connect(c, u, f, rc, *args):
+                    if rc == 0:
+                        c.subscribe(mqtt_topic, qos=1)
+
+                def on_message(c, u, msg):
+                    try:
+                        payload = json.loads(msg.payload.decode())
+                        sensors = np.array(payload["sensors"], dtype=np.float32)
+                        if len(sensors) == N_FEATURES:
+                            data_q.put((payload.get("cycle", -1), sensors))
+                    except Exception:
+                        pass
+
+                client.on_connect = on_connect
+                client.on_message = on_message
+                client.connect(mqtt_broker, int(mqtt_port), keepalive=60)
+                client.loop_forever()
+
+            threading.Thread(target=_mqtt_thread, daemon=True).start()
+
+            ph_conn    = st.empty()
+            ph_prog    = st.empty()
+            ph_status  = st.empty()
+            ph_alert   = st.empty()
+            ph_metrics = st.empty()
+
+            engine = _SE(det_runner, rul_runner, win=win_size)
+            rul_hist: list[float] = []
+            cyc_hist:  list[int]  = []
+            received = 0
+
+            ph_conn.success(f"已连接 {mqtt_broker}:{mqtt_port}  |  等待数据...")
+
+            TIMEOUT = 120
+            last_recv = time.time()
+
+            while time.time() - last_recv < TIMEOUT:
+                try:
+                    cycle_num, row = data_q.get(timeout=0.5)
+                    last_recv = time.time()
+                    received += 1
+                    result = engine.feed(row)
+
+                    if not result.ready:
+                        fill = result.buffer_fill
+                        ph_prog.progress(
+                            fill / win_size,
+                            text=f"⏳ 缓冲区预热：{fill} / {win_size} 条  （第 {received} 条，周期 {cycle_num}）"
+                        )
+                        ph_status.info(f"正在积累数据，还需 {win_size - fill} 条才开始推理…")
+                        continue
+
+                    ph_prog.progress(1.0, text=f"✅ 推理中  周期 {cycle_num}  （共收到 {received} 条）")
+
+                    det_res = result.detection
+                    rul_res = result.rul
+                    if det_res is None or rul_res is None:
+                        continue
+
+                    rul_hist.append(rul_res.score)
+                    cyc_hist.append(cycle_num if cycle_num > 0 else received)
+
+                    det_lbl = STATUS_EMOJI.get(det_res.label, det_res.label)
+                    rul_lbl = STATUS_EMOJI.get(rul_res.label, rul_res.label)
+
+                    if result.alert_change:
+                        alert_msg = (f"🚨 周期 {cycle_num}：状态变为 {det_res.label}"
+                                     if result.alert else f"✅ 周期 {cycle_num}：状态恢复正常")
+                        (ph_alert.error if result.alert else ph_alert.success)(alert_msg)
+
                     with ph_metrics.container():
+                        # ── 诊断概览 ──
+                        st.subheader("📊 诊断概览")
                         m1, m2, m3, m4 = st.columns(4)
-                        m1.metric("当前周期", cn)
-                        m2.metric("缓冲区", f"{result.buffer_fill}/{engine.win}")
-                        m3.metric("预测 RUL", f"{result.rul.score:.0f}")
-                        m4.metric("集成得分", f"{result.detection.score:.4f}")
-                    ph_prog.progress(cn / n_cycles, text=f"进度 {cn}/{n_cycles}")
-                    if len(cyc_hist) > 1:
-                        import pandas as pd
-                        ph_chart.line_chart(pd.DataFrame({"预测RUL": rul_hist}, index=cyc_hist), height=250)
-                else:
-                    ph_status.info(f"周期 {cn}：预热中 {result.buffer_fill}/{engine.win}…")
-                    ph_prog.progress(result.buffer_fill / engine.win)
-                time.sleep(1.0 / speed)
-            st.success("✅ 流式推理完成！")
+                        m1.metric("当前周期",   cycle_num)
+                        m2.metric("收到数据",   f"{received} 条")
+                        m3.metric("故障检测",   det_lbl)
+                        m4.metric("预测 RUL",   f"{rul_res.score:.0f} 周期")
+
+                        # ── RUL 趋势图 ──
+                        if len(cyc_hist) > 1:
+                            import pandas as pd
+                            st.subheader("📈 剩余寿命退化趋势")
+                            st.line_chart(
+                                pd.DataFrame({"预测RUL": rul_hist}, index=cyc_hist),
+                                height=250,
+                            )
+                            st.caption("横轴：运行周期；纵轴：预测剩余寿命（越低越危险）")
+
+                        # ── 故障检测详情 ──
+                        st.subheader("🔍 故障检测详情")
+                        raw = det_res.raw
+                        weights = raw.get("weights", {})
+                        score_map = {"LSTM AE": "ae_score", "Isolation Forest": "iso_score",
+                                     "OC-SVM": "ocsvm_score", "Random Forest": "rf_score"}
+                        wt_map = {"LSTM AE": "lstm_ae", "Isolation Forest": "isolation_forest",
+                                  "OC-SVM": "ocsvm", "Random Forest": "random_forest"}
+                        sub_cols = st.columns(4)
+                        for col, (lbl, sk) in zip(sub_cols, score_map.items()):
+                            sc = raw.get(sk, 0)
+                            col.metric(lbl, f"{sc:.3f}", f"权重 {weights.get(wt_map[lbl], 0):.1%}")
+                            col.progress(float(sc), text="故障概率")
+
+                        st.divider()
+                        ca, cb = st.columns(2)
+                        with ca:
+                            st.subheader("集成结果")
+                            ens = raw.get("ensemble_score", det_res.score)
+                            st.metric("集成得分", f"{ens:.4f}")
+                            st.progress(float(ens),
+                                        text=f"fault>{raw.get('fault_threshold', 0.25)}  "
+                                             f"critical>{raw.get('critical_threshold', 0.45)}")
+                            st.caption(f"LSTM AE 重建误差: {raw.get('recon_err', 0):.6f}  "
+                                       f"(阈值 {raw.get('ae_threshold', 0):.6f})")
+                        with cb:
+                            st.subheader("原始输出")
+                            st.json(raw)
+
+                        # ── RUL 详情 ──
+                        st.subheader("⏱️ 剩余寿命预测详情")
+                        cc, cd = st.columns(2)
+                        rul_cap = rul_res.raw.get("rul_cap", 125)
+                        with cc:
+                            st.metric("预测 RUL", f"{rul_res.score:.1f} 周期")
+                            st.metric("RUL 状态", rul_lbl)
+                            st.progress(max(0.0, min(rul_res.score / rul_cap, 1.0)),
+                                        text=f"健康度 {rul_res.score / rul_cap:.0%}")
+                        with cd:
+                            st.subheader("预测参数")
+                            st.json(rul_res.raw)
+
+                except queue.Empty:
+                    if received == 0:
+                        ph_status.info("等待发送端数据…")
+
+            ph_conn.warning(f"连接超时（{TIMEOUT}s 无数据），已断开。共处理 {received} 条数据。")
+
+            # ── LLM 维护建议（流式结束后）──
+            if received > 0 and rul_hist:
+                st.divider()
+                st.subheader("🧠 AI 维护建议")
+                if st.button("生成维护建议", type="primary", key="mqtt_llm"):
+                    from models.base import ModelResult as _MR
+                    with st.spinner("大模型推理中…"):
+                        final_result = _MR(
+                            label=rul_res.label if rul_res else "unknown",
+                            score=rul_hist[-1],
+                            raw={
+                                "rul_cycles":    round(rul_hist[-1], 1),
+                                "detection":     det_res.label if det_res else "unknown",
+                                "ensemble_score": det_res.score if det_res else 0,
+                                "cycles_received": received,
+                                "last_cycle":    cycle_num,
+                            },
+                        )
+                        prompt = build_recommendation_prompt(
+                            result=final_result,
+                            history=[],
+                            status=final_result.label,
+                            context=ctx,
+                            allow_data_upload=False,
+                            data_excerpt=None,
+                        )
+                        rec = llm.complete(prompt)
+                    st.success(rec)
+                    st.caption("由大模型基于最终检测结果与 RUL 预测综合生成")
 
 
 # ═══════════════════════════════════════════════════════════
